@@ -18,7 +18,9 @@ module Distribution.Client.Configure (
   ) where
 
 import Distribution.Client.Dependency
-import Distribution.Client.Dependency.Types (AllowNewer(..), isAllowNewer)
+import Distribution.Client.Dependency.Types
+         ( AllowNewer(..), isAllowNewer, ConstraintSource(..)
+         , LabeledPackageConstraint(..) )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import Distribution.Client.InstallPlan (InstallPlan)
 import Distribution.Client.IndexUtils as IndexUtils
@@ -112,14 +114,16 @@ configure verbosity packageDBs repos comp platform conf
            "Warning: solver failed to find a solution:\n"
         ++ message
         ++ "Trying configure anyway."
-      setupWrapper verbosity (setupScriptOptions installedPkgIndex Nothing) Nothing
-        configureCommand (const configFlags) extraArgs
+      setupWrapper verbosity (setupScriptOptions installedPkgIndex Nothing)
+        Nothing configureCommand (const configFlags) extraArgs
 
     Right installPlan -> case InstallPlan.ready installPlan of
-      [pkg@(ReadyPackage (SourcePackage _ _ (LocalUnpackedPackage _) _) _ _ _)] -> do
+      [pkg@(ReadyPackage
+             (ConfiguredPackage (SourcePackage _ _ (LocalUnpackedPackage _) _)
+                                 _ _ _)
+             _)] -> do
         configurePackage verbosity
-          (InstallPlan.planPlatform installPlan)
-          (InstallPlan.planCompiler installPlan)
+          platform (compilerInfo comp)
           (setupScriptOptions installedPkgIndex (Just pkg))
           configFlags pkg extraArgs
 
@@ -127,7 +131,9 @@ configure verbosity packageDBs repos comp platform conf
               ++ "one local ready package."
 
   where
-    setupScriptOptions :: InstalledPackageIndex -> Maybe ReadyPackage -> SetupScriptOptions
+    setupScriptOptions :: InstalledPackageIndex
+                       -> Maybe ReadyPackage
+                       -> SetupScriptOptions
     setupScriptOptions =
       configureSetupScript
         packageDBs
@@ -206,7 +212,8 @@ configureSetupScript packageDBs
 
     explicitSetupDeps :: Maybe [(InstalledPackageId, PackageId)]
     explicitSetupDeps = do
-      ReadyPackage (SourcePackage _ gpkg _ _) _ _ deps <- mpkg
+      ReadyPackage (ConfiguredPackage (SourcePackage _ gpkg _ _) _ _ _) deps
+                 <- mpkg
       -- Check if there is an explicit setup stanza
       _buildInfo <- PkgDesc.setupBuildInfo (PkgDesc.packageDescription gpkg)
       -- Return the setup dependencies computed by the solver
@@ -225,10 +232,12 @@ planLocalPackage :: Verbosity -> Compiler
                  -> InstalledPackageIndex
                  -> SourcePackageDb
                  -> IO (Progress String String InstallPlan)
-planLocalPackage verbosity comp platform configFlags configExFlags installedPkgIndex
+planLocalPackage verbosity comp platform configFlags configExFlags
+  installedPkgIndex
   (SourcePackageDb _ packagePrefs) = do
   pkg <- readPackageDescription verbosity =<< defaultPackageDesc verbosity
-  solver <- chooseSolver verbosity (fromFlag $ configSolver configExFlags) (compilerInfo comp)
+  solver <- chooseSolver verbosity (fromFlag $ configSolver configExFlags)
+            (compilerInfo comp)
 
   let -- We create a local package and ask to resolve a dependency on it
       localPkg = SourcePackage {
@@ -255,19 +264,23 @@ planLocalPackage verbosity comp platform configFlags configExFlags installedPkgI
             -- version constraints from the config file or command line
             -- TODO: should warn or error on constraints that are not on direct
             -- deps or flag constraints not on the package in question.
-            (map userToPackageConstraint (configExConstraints configExFlags))
+            [ LabeledPackageConstraint (userToPackageConstraint uc) src
+            | (uc, src) <- configExConstraints configExFlags ]
 
         . addConstraints
             -- package flags from the config file or command line
-            [ PackageConstraintFlags (packageName pkg)
-                                     (configConfigurationsFlags configFlags) ]
+            [ let pc = PackageConstraintFlags (packageName pkg)
+                       (configConfigurationsFlags configFlags)
+              in LabeledPackageConstraint pc ConstraintSourceConfigFlagOrTarget
+            ]
 
         . addConstraints
             -- '--enable-tests' and '--enable-benchmarks' constraints from
-            -- command line
-            [ PackageConstraintStanzas (packageName pkg) $
-                [ TestStanzas  | testsEnabled ] ++
-                [ BenchStanzas | benchmarksEnabled ]
+            -- the config file or command line
+            [ let pc = PackageConstraintStanzas (packageName pkg) $
+                       [ TestStanzas  | testsEnabled ] ++
+                       [ BenchStanzas | benchmarksEnabled ]
+              in LabeledPackageConstraint pc ConstraintSourceConfigFlagOrTarget
             ]
 
         $ standardInstallPolicy
@@ -294,7 +307,10 @@ configurePackage :: Verbosity
                  -> [String]
                  -> IO ()
 configurePackage verbosity platform comp scriptOptions configFlags
-  (ReadyPackage (SourcePackage _ gpkg _ _) flags stanzas deps) extraArgs =
+                 (ReadyPackage (ConfiguredPackage (SourcePackage _ gpkg _ _)
+                                                  flags stanzas _)
+                               deps)
+                 extraArgs =
 
   setupWrapper verbosity
     scriptOptions (Just pkg) configureCommand configureFlags extraArgs

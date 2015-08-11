@@ -17,16 +17,17 @@ module Distribution.Client.Types where
 import Distribution.Package
          ( PackageName, PackageId, Package(..)
          , mkPackageKey, PackageKey, InstalledPackageId(..)
-         , HasInstalledPackageId(..), PackageInstalled(..) )
+         , HasInstalledPackageId(..), PackageInstalled(..)
+         , LibraryName, packageKeyLibraryName )
 import Distribution.InstalledPackageInfo
-         ( InstalledPackageInfo )
+         ( InstalledPackageInfo, InstalledPackageInfo_ )
 import Distribution.PackageDescription
          ( Benchmark(..), GenericPackageDescription(..), FlagAssignment
          , TestSuite(..) )
 import Distribution.PackageDescription.Configuration
          ( mapTreeData )
 import Distribution.Client.PackageIndex
-         ( PackageIndex, PackageFixedDeps(..) )
+         ( PackageIndex )
 import Distribution.Client.ComponentDeps
          ( ComponentDeps )
 import qualified Distribution.Client.ComponentDeps as CD
@@ -38,7 +39,7 @@ import Distribution.Text (display)
 import qualified Distribution.InstalledPackageInfo as Info
 
 import Data.Map (Map)
-import Network.URI (URI)
+import Network.URI (URI, nullURI)
 import Data.ByteString.Lazy (ByteString)
 import Control.Exception
          ( SomeException )
@@ -57,20 +58,18 @@ data SourcePackageDb = SourcePackageDb {
 -- * Various kinds of information about packages
 -- ------------------------------------------------------------
 
--- | InstalledPackage caches its dependencies as source package IDs.
--- This is for the benefit of the top-down solver only.
-data InstalledPackage = InstalledPackage
-       InstalledPackageInfo
-       [PackageId]
+-- | Subclass of packages that have specific versioned dependencies.
+--
+-- So for example a not-yet-configured package has dependencies on version
+-- ranges, not specific versions. A configured or an already installed package
+-- depends on exact versions. Some operations or data structures (like
+--  dependency graphs) only make sense on this subclass of package types.
+--
+class Package pkg => PackageFixedDeps pkg where
+  depends :: pkg -> ComponentDeps [InstalledPackageId]
 
-instance Package InstalledPackage where
-  packageId (InstalledPackage pkg _) = packageId pkg
-instance PackageFixedDeps InstalledPackage where
-  depends (InstalledPackage pkg _) = depends pkg
-instance HasInstalledPackageId InstalledPackage where
-  installedPackageId (InstalledPackage pkg _) = installedPackageId pkg
-instance PackageInstalled InstalledPackage where
-  installedDepends (InstalledPackage pkg _) = installedDepends pkg
+instance PackageFixedDeps (InstalledPackageInfo_ str) where
+  depends = CD.fromInstalled . installedDepends
 
 
 -- | In order to reuse the implementation of PackageIndex which relies on
@@ -132,43 +131,38 @@ instance HasInstalledPackageId ConfiguredPackage where
 
 -- | Like 'ConfiguredPackage', but with all dependencies guaranteed to be
 -- installed already, hence itself ready to be installed.
-data ReadyPackage = ReadyPackage
-       SourcePackage                           -- see 'ConfiguredPackage'.
-       FlagAssignment                          --
-       [OptionalStanza]                        --
-       (ComponentDeps [InstalledPackageInfo])  -- Installed dependencies.
-  deriving Show
+data GenericReadyPackage srcpkg ipkg
+   = ReadyPackage
+       srcpkg                  -- see 'ConfiguredPackage'.
+       (ComponentDeps [ipkg])  -- Installed dependencies.
+  deriving (Eq, Show)
 
-instance Package ReadyPackage where
-  packageId (ReadyPackage pkg _ _ _) = packageId pkg
+type ReadyPackage = GenericReadyPackage ConfiguredPackage InstalledPackageInfo
 
-instance PackageFixedDeps ReadyPackage where
-  depends (ReadyPackage _ _ _ deps) = fmap (map installedPackageId) deps
+instance Package srcpkg => Package (GenericReadyPackage srcpkg ipkg) where
+  packageId (ReadyPackage srcpkg _deps) = packageId srcpkg
 
-instance HasInstalledPackageId ReadyPackage where
-  installedPackageId = fakeInstalledPackageId . packageId
+instance (Package srcpkg, HasInstalledPackageId ipkg) =>
+         PackageFixedDeps (GenericReadyPackage srcpkg ipkg) where
+  depends (ReadyPackage _ deps) = fmap (map installedPackageId) deps
+
+instance HasInstalledPackageId srcpkg =>
+         HasInstalledPackageId (GenericReadyPackage srcpkg ipkg) where
+  installedPackageId (ReadyPackage pkg _) = installedPackageId pkg
 
 
 -- | Extracts a package key from ReadyPackage, a common operation needed
 -- to calculate build paths.
 readyPackageKey :: Compiler -> ReadyPackage -> PackageKey
-readyPackageKey comp (ReadyPackage pkg _ _ deps) =
+readyPackageKey comp (ReadyPackage pkg deps) =
     mkPackageKey (packageKeySupported comp) (packageId pkg)
-                 (map Info.packageKey (CD.nonSetupDeps deps)) []
+                 (map Info.libraryName (CD.nonSetupDeps deps))
 
-
--- | Sometimes we need to convert a 'ReadyPackage' back to a
--- 'ConfiguredPackage'. For example, a failed 'PlanPackage' can be *either*
--- Ready or Configured.
-readyPackageToConfiguredPackage :: ReadyPackage -> ConfiguredPackage
-readyPackageToConfiguredPackage (ReadyPackage srcpkg flags stanzas deps) =
-    ConfiguredPackage srcpkg flags stanzas (fmap (map aux) deps)
-  where
-    aux :: InstalledPackageInfo -> ConfiguredId
-    aux info = ConfiguredId {
-        confSrcId  = Info.sourcePackageId info
-      , confInstId = installedPackageId info
-      }
+-- | Extracts a library name from ReadyPackage, a common operation needed
+-- to calculate build paths.
+readyLibraryName :: Compiler -> ReadyPackage -> LibraryName
+readyLibraryName comp ready@(ReadyPackage pkg _) =
+    packageKeyLibraryName (packageId pkg) (readyPackageKey comp ready)
 
 
 -- | A package description along with the location of the package sources.
@@ -235,11 +229,28 @@ data PackageLocation local =
 data LocalRepo = LocalRepo
   deriving (Show,Eq)
 
-data RemoteRepo = RemoteRepo {
-    remoteRepoName :: String,
-    remoteRepoURI  :: URI
-  }
+data RemoteRepo =
+    RemoteRepo {
+      remoteRepoName     :: String,
+      remoteRepoURI      :: URI,
+      remoteRepoRootKeys :: (),
+
+      -- | Normally a repo just specifies an HTTP or HTTPS URI, but as a
+      -- special case we may know a repo supports both and want to try HTTPS
+      -- if we can, but still allow falling back to HTTP.
+      --
+      -- This field is not currently stored in the config file, but is filled
+      -- in automagically for known repos.
+      remoteRepoShouldTryHttps :: Bool
+    }
+
+  -- FIXME: discuss this type some more.
+
   deriving (Show,Eq,Ord)
+
+-- | Construct a partial 'RemoteRepo' value to fold the field parser list over.
+emptyRemoteRepo :: String -> RemoteRepo
+emptyRemoteRepo name = RemoteRepo name nullURI () False
 
 data Repo = Repo {
     repoKind     :: Either RemoteRepo LocalRepo,

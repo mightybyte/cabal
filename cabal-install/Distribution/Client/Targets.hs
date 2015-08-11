@@ -52,13 +52,15 @@ import Distribution.Package
 import Distribution.Client.Types
          ( SourcePackage(..), PackageLocation(..), OptionalStanza(..) )
 import Distribution.Client.Dependency.Types
-         ( PackageConstraint(..) )
+         ( PackageConstraint(..), ConstraintSource(..)
+         , LabeledPackageConstraint(..) )
 
 import qualified Distribution.Client.World as World
 import Distribution.Client.PackageIndex (PackageIndex)
 import qualified Distribution.Client.PackageIndex as PackageIndex
 import qualified Distribution.Client.Tar as Tar
 import Distribution.Client.FetchUtils
+import Distribution.Client.HttpUtils ( HttpTransport(..) )
 import Distribution.Client.Utils ( tryFindPackageDesc )
 
 import Distribution.PackageDescription
@@ -186,12 +188,15 @@ pkgSpecifierTarget (NamedPackage name _)       = name
 pkgSpecifierTarget (SpecificSourcePackage pkg) = packageName pkg
 
 pkgSpecifierConstraints :: Package pkg
-                        => PackageSpecifier pkg -> [PackageConstraint]
-pkgSpecifierConstraints (NamedPackage _ constraints) = constraints
+                        => PackageSpecifier pkg -> [LabeledPackageConstraint]
+pkgSpecifierConstraints (NamedPackage _ constraints) = map toLpc constraints
+  where
+    toLpc pc = LabeledPackageConstraint pc ConstraintSourceUserTarget
 pkgSpecifierConstraints (SpecificSourcePackage pkg)  =
-  [PackageConstraintVersion (packageName pkg)
-                            (thisVersion (packageVersion pkg))]
-
+    [LabeledPackageConstraint pc ConstraintSourceUserTarget]
+  where
+    pc = PackageConstraintVersion (packageName pkg)
+         (thisVersion (packageVersion pkg))
 
 -- ------------------------------------------------------------
 -- * Parsing and checking user targets
@@ -264,7 +269,7 @@ readUserTarget targetstr =
             uriScheme    = scheme,
             uriAuthority = Just URIAuth { uriRegName = host }
           }
-          | scheme /= "http:" ->
+          | scheme /= "http:" && scheme /= "https:" ->
             Just (Left (UserTargetUnexpectedUriScheme targetstr))
 
           | null host ->
@@ -331,7 +336,7 @@ reportUserTargetProblems problems = do
               $ unlines
                   [ "URL target not supported '" ++ name ++ "'."
                   | name <- target ]
-             ++ "Only 'http://' URLs are supported."
+             ++ "Only 'http://' and 'https://' URLs are supported."
 
     case [ target | UserTargetUnrecognisedUri target <- problems ] of
       []     -> return ()
@@ -351,16 +356,17 @@ reportUserTargetProblems problems = do
 --
 resolveUserTargets :: Package pkg
                    => Verbosity
+                   -> HttpTransport
                    -> FilePath
                    -> PackageIndex pkg
                    -> [UserTarget]
                    -> IO [PackageSpecifier SourcePackage]
-resolveUserTargets verbosity worldFile available userTargets = do
+resolveUserTargets verbosity transport worldFile available userTargets = do
 
     -- given the user targets, get a list of fully or partially resolved
     -- package references
     packageTargets <- mapM (readPackageTarget verbosity)
-                  =<< mapM (fetchPackageTarget verbosity) . concat
+                  =<< mapM (fetchPackageTarget transport verbosity) . concat
                   =<< mapM (expandUserTarget worldFile) userTargets
 
     -- users are allowed to give package names case-insensitively, so we must
@@ -446,14 +452,15 @@ localPackageError dir =
 
 -- | Fetch any remote targets so that they can be read.
 --
-fetchPackageTarget :: Verbosity
+fetchPackageTarget :: HttpTransport
+                   -> Verbosity
                    -> PackageTarget (PackageLocation ())
                    -> IO (PackageTarget (PackageLocation FilePath))
-fetchPackageTarget verbosity target = case target of
+fetchPackageTarget transport verbosity target = case target of
     PackageTargetNamed      n cs ut -> return (PackageTargetNamed      n cs ut)
     PackageTargetNamedFuzzy n cs ut -> return (PackageTargetNamedFuzzy n cs ut)
     PackageTargetLocation location  -> do
-      location' <- fetchPackage verbosity (fmap (const Nothing) location)
+      location' <- fetchPackage transport verbosity (fmap (const Nothing) location)
       return (PackageTargetLocation location')
 
 

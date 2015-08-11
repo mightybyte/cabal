@@ -45,6 +45,7 @@ module Distribution.Client.Setup
     --TODO: stop exporting these:
     , showRepo
     , parseRepo
+    , readRepo
     ) where
 
 import Distribution.Client.Types
@@ -52,7 +53,7 @@ import Distribution.Client.Types
 import Distribution.Client.BuildReports.Types
          ( ReportLevel(..) )
 import Distribution.Client.Dependency.Types
-         ( AllowNewer(..), PreSolver(..) )
+         ( AllowNewer(..), PreSolver(..), ConstraintSource(..) )
 import qualified Distribution.Client.Init.Types as IT
          ( InitFlags(..), PackageType(..) )
 import Distribution.Client.Targets
@@ -126,7 +127,8 @@ data GlobalFlags = GlobalFlags {
     globalLogsDir           :: Flag FilePath,
     globalWorldFile         :: Flag FilePath,
     globalRequireSandbox    :: Flag Bool,
-    globalIgnoreSandbox     :: Flag Bool
+    globalIgnoreSandbox     :: Flag Bool,
+    globalHttpTransport     :: Flag String
   }
 
 defaultGlobalFlags :: GlobalFlags
@@ -141,7 +143,8 @@ defaultGlobalFlags  = GlobalFlags {
     globalLogsDir           = mempty,
     globalWorldFile         = mempty,
     globalRequireSandbox    = Flag False,
-    globalIgnoreSandbox     = Flag False
+    globalIgnoreSandbox     = Flag False,
+    globalHttpTransport     = mempty
   }
 
 globalCommand :: [Command action] -> CommandUI GlobalFlags
@@ -262,7 +265,7 @@ globalCommand commands = CommandUI {
     commandNotes = Nothing,
     commandDefaultFlags = mempty,
     commandOptions      = \showOrParseArgs ->
-      (case showOrParseArgs of ShowArgs -> take 6; ParseArgs -> id)
+      (case showOrParseArgs of ShowArgs -> take 7; ParseArgs -> id)
       [option ['V'] ["version"]
          "Print version information"
          globalVersion (\v flags -> flags { globalVersion = v })
@@ -292,6 +295,11 @@ globalCommand commands = CommandUI {
          "Ignore any existing sandbox"
          globalIgnoreSandbox (\v flags -> flags { globalIgnoreSandbox = v })
          trueArg
+
+      ,option [] ["http-transport"]
+         "Set a transport for http(s) requests. Accepts 'curl', 'wget', 'powershell', and 'plain-http'. (default: 'curl')"
+         globalConfigFile (\v flags -> flags { globalHttpTransport = v })
+         (reqArgFlag "HttpTransport")
 
       ,option [] ["remote-repo"]
          "The name and url for a remote repository"
@@ -332,7 +340,8 @@ instance Monoid GlobalFlags where
     globalLogsDir           = mempty,
     globalWorldFile         = mempty,
     globalRequireSandbox    = mempty,
-    globalIgnoreSandbox     = mempty
+    globalIgnoreSandbox     = mempty,
+    globalHttpTransport     = mempty
   }
   mappend a b = GlobalFlags {
     globalVersion           = combine globalVersion,
@@ -345,7 +354,8 @@ instance Monoid GlobalFlags where
     globalLogsDir           = combine globalLogsDir,
     globalWorldFile         = combine globalWorldFile,
     globalRequireSandbox    = combine globalRequireSandbox,
-    globalIgnoreSandbox     = combine globalIgnoreSandbox
+    globalIgnoreSandbox     = combine globalIgnoreSandbox,
+    globalHttpTransport     = combine globalHttpTransport
   }
     where combine field = field a `mappend` field b
 
@@ -386,7 +396,7 @@ configureOptions = commandOptions configureCommand
 
 filterConfigureFlags :: ConfigFlags -> Version -> ConfigFlags
 filterConfigureFlags flags cabalLibVersion
-  | cabalLibVersion >= Version [1,22,0] [] = flags_latest
+  | cabalLibVersion >= Version [1,23,0] [] = flags_latest
   -- ^ NB: we expect the latest version to be the most common case.
   | cabalLibVersion <  Version [1,3,10] [] = flags_1_3_10
   | cabalLibVersion <  Version [1,10,0] [] = flags_1_10_0
@@ -396,13 +406,18 @@ filterConfigureFlags flags cabalLibVersion
   | cabalLibVersion <  Version [1,19,2] [] = flags_1_19_1
   | cabalLibVersion <  Version [1,21,1] [] = flags_1_20_0
   | cabalLibVersion <  Version [1,22,0] [] = flags_1_21_0
+  | cabalLibVersion <  Version [1,23,0] [] = flags_1_22_0
   | otherwise = flags_latest
   where
     -- Cabal >= 1.19.1 uses '--dependency' and does not need '--constraint'.
     flags_latest = flags        { configConstraints = [] }
 
+    -- Cabal < 1.23 doesn't know about '--profiling-detail'.
+    flags_1_22_0 = flags_latest { configProfDetail    = NoFlag
+                                , configProfLibDetail = NoFlag }
+
     -- Cabal < 1.22 doesn't know about '--disable-debug-info'.
-    flags_1_21_0 = flags_latest { configDebugInfo = NoFlag }
+    flags_1_21_0 = flags_1_22_0 { configDebugInfo = NoFlag }
 
     -- Cabal < 1.21.1 doesn't know about 'disable-relocatable'
     -- Cabal < 1.21.1 doesn't know about 'enable-profiling'
@@ -441,7 +456,7 @@ filterConfigureFlags flags cabalLibVersion
 --
 data ConfigExFlags = ConfigExFlags {
     configCabalVersion :: Flag Version,
-    configExConstraints:: [UserConstraint],
+    configExConstraints:: [(UserConstraint, ConstraintSource)],
     configPreferences  :: [Dependency],
     configSolver       :: Flag PreSolver,
     configAllowNewer   :: Flag AllowNewer
@@ -458,14 +473,17 @@ configureExCommand = configureCommand {
          liftOptions fst setFst
          (filter ((`notElem` ["constraint", "dependency", "exact-configuration"])
                   . optionName) $ configureOptions  showOrParseArgs)
-      ++ liftOptions snd setSnd (configureExOptions showOrParseArgs)
+      ++ liftOptions snd setSnd
+         (configureExOptions showOrParseArgs ConstraintSourceCommandlineFlag)
   }
   where
     setFst a (_,b) = (a,b)
     setSnd b (a,_) = (a,b)
 
-configureExOptions ::  ShowOrParseArgs -> [OptionField ConfigExFlags]
-configureExOptions _showOrParseArgs =
+configureExOptions :: ShowOrParseArgs
+                   -> ConstraintSource
+                   -> [OptionField ConfigExFlags]
+configureExOptions _showOrParseArgs src =
   [ option [] ["cabal-lib-version"]
       ("Select which version of the Cabal lib to use to build packages "
       ++ "(useful for testing).")
@@ -477,8 +495,8 @@ configureExOptions _showOrParseArgs =
       "Specify constraints on a package (version, installed/source, flags)"
       configExConstraints (\v flags -> flags { configExConstraints = v })
       (reqArg "CONSTRAINT"
-              (fmap (\x -> [x]) (ReadE readUserConstraint))
-              (map display))
+              ((\x -> [(x, src)]) `fmap` ReadE readUserConstraint)
+              (map $ display . fst))
 
   , option [] ["preference"]
       "Specify preferences (soft constraints) on the version of a package"
@@ -1350,7 +1368,7 @@ installCommand = CommandUI {
                            , "exact-configuration"])
                 . optionName) $
                               configureOptions   showOrParseArgs)
-    ++ liftOptions get2 set2 (configureExOptions showOrParseArgs)
+    ++ liftOptions get2 set2 (configureExOptions showOrParseArgs ConstraintSourceCommandlineFlag)
     ++ liftOptions get3 set3 (installOptions     showOrParseArgs)
     ++ liftOptions get4 set4 (haddockOptions     showOrParseArgs)
   }
@@ -1985,7 +2003,7 @@ sandboxCommand = CommandUI {
     , headLine "init:"
     , indentParagraph $ "Initialize a sandbox in the current directory."
       ++ " An existing package database will not be modified, but settings"
-      ++ " (such as the location of the database) can be modified this way." 
+      ++ " (such as the location of the database) can be modified this way."
     , headLine "delete:"
     , indentParagraph $ "Remove the sandbox; deleting all the packages"
       ++ " installed inside."
@@ -2286,13 +2304,15 @@ readRepo = readPToMaybe parseRepo
 
 parseRepo :: Parse.ReadP r RemoteRepo
 parseRepo = do
-  name <- Parse.munch1 (\c -> isAlphaNum c || c `elem` "_-.")
-  _ <- Parse.char ':'
+  name   <- Parse.munch1 (\c -> isAlphaNum c || c `elem` "_-.")
+  _      <- Parse.char ':'
   uriStr <- Parse.munch1 (\c -> isAlphaNum c || c `elem` "+-=._/*()@'$:;&!?~")
-  uri <- maybe Parse.pfail return (parseAbsoluteURI uriStr)
-  return $ RemoteRepo {
-    remoteRepoName = name,
-    remoteRepoURI  = uri
+  uri    <- maybe Parse.pfail return (parseAbsoluteURI uriStr)
+  return RemoteRepo {
+    remoteRepoName           = name,
+    remoteRepoURI            = uri,
+    remoteRepoRootKeys       = (),
+    remoteRepoShouldTryHttps = False
   }
 
 -- ------------------------------------------------------------
