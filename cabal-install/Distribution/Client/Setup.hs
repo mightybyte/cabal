@@ -26,6 +26,7 @@ module Distribution.Client.Setup
     , infoCommand, InfoFlags(..)
     , fetchCommand, FetchFlags(..)
     , freezeCommand, FreezeFlags(..)
+    , genBoundsCommand, GenBoundsFlags(..)
     , getCommand, unpackCommand, GetFlags(..)
     , checkCommand
     , formatCommand
@@ -184,6 +185,7 @@ globalCommand commands = CommandUI {
           , "upload"
           , "report"
           , "freeze"
+          , "genBounds"
           , "haddock"
           , "hscolour"
           , "copy"
@@ -234,6 +236,7 @@ globalCommand commands = CommandUI {
         , addCmd "report"
         , par
         , addCmd "freeze"
+        , addCmd "genBounds"
         , addCmd "haddock"
         , addCmd "hscolour"
         , addCmd "copy"
@@ -779,6 +782,36 @@ freezeCommand = CommandUI {
                          freezeShadowPkgs       (\v flags -> flags { freezeShadowPkgs       = v })
                          freezeStrongFlags      (\v flags -> flags { freezeStrongFlags      = v })
 
+  }
+
+data GenBoundsFlags = GenBoundsFlags {
+  -- Placeholder...does nothing right now
+  genBoundsVerbosity :: Flag Verbosity
+}
+
+instance Monoid GenBoundsFlags where
+  mempty = GenBoundsFlags {
+    genBoundsVerbosity = toFlag normal
+    }
+  mappend a b = GenBoundsFlags {
+    genBoundsVerbosity = combine genBoundsVerbosity
+    }
+    where combine field = field a `mappend` field b
+
+genBoundsCommand :: CommandUI GenBoundsFlags
+genBoundsCommand = CommandUI {
+    commandName         = "genBounds",
+    commandSynopsis     = "Generate dependency bounds.",
+    commandDescription  = Just $ \_ -> wrapText $
+         "Generates bounds for all dependencies that do not currently have them. "
+      ++ "Generated bounds are printed to stdout.  You can then paste them into your .cabal file.\n"
+      ++ "\n",
+    commandNotes        = Nothing,
+    commandUsage        = usageFlags "genBounds",
+    commandDefaultFlags = mempty,
+    commandOptions      = \ _ -> [
+     optionVerbosity genBoundsVerbosity (\v flags -> flags { genBoundsVerbosity = v })
+     ]
   }
 
 -- ------------------------------------------------------------

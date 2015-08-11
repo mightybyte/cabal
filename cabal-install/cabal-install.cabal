@@ -130,19 +130,19 @@ executable cabal
     -- NOTE: when updating build-depends, don't forget to update version regexps
     -- in bootstrap.sh.
     build-depends:
-        array      >= 0.1      && < 0.6,
-        base       >= 4.3      && < 5,
-        bytestring >= 0.9      && < 1,
-        Cabal      >= 1.23     && < 1.24,
-        containers >= 0.1      && < 0.6,
-        filepath   >= 1.0      && < 1.5,
-        HTTP       >= 4000.2.5 && < 4000.3,
-        mtl        >= 2.0      && < 3,
-        pretty     >= 1        && < 1.2,
-        random     >= 1        && < 1.2,
-        stm        >= 2.0      && < 3,
-        time       >= 1.1      && < 1.6,
-        zlib       >= 0.5.3    && < 0.6
+        array      >= 0.1     ,
+        base       >= 4.3     ,
+        bytestring >= 0.9     ,
+        Cabal      >= 1.23    ,
+        containers >= 0.1     ,
+        filepath   >= 1.0     ,
+        HTTP       >= 4000.2.5,
+        mtl        >= 2.0     ,
+        pretty     >= 1       ,
+        random     >= 1       ,
+        stm        >= 2.0     ,
+        time       >= 1.1     ,
+        zlib       >= 0.5.3   
 
     if flag(old-directory)
       build-depends: directory >= 1 && < 1.2, old-time >= 1 && < 1.2,

@@ -25,6 +25,7 @@ import Distribution.Client.Setup
          , installCommand, upgradeCommand, uninstallCommand
          , FetchFlags(..), fetchCommand
          , FreezeFlags(..), freezeCommand
+         , GenBoundsFlags(..), genBoundsCommand
          , GetFlags(..), getCommand, unpackCommand
          , checkCommand
          , formatCommand
@@ -71,6 +72,7 @@ import Distribution.Client.Update             (update)
 import Distribution.Client.Exec               (exec)
 import Distribution.Client.Fetch              (fetch)
 import Distribution.Client.Freeze             (freeze)
+import Distribution.Client.GenBounds          (genBounds)
 import Distribution.Client.Check as Check     (check)
 --import Distribution.Client.Clean            (clean)
 import Distribution.Client.Upload as Upload   (upload, check, report)
@@ -127,7 +129,7 @@ import Distribution.Simple.Command
          ( CommandParse(..), CommandUI(..), Command
          , commandsRun, commandAddAction, hiddenCommand )
 import Distribution.Simple.Compiler
-         ( Compiler(..) )
+         ( Compiler(..), compilerInfo )
 import Distribution.Simple.Configure
          ( checkPersistBuildConfigOutdated, configCompilerAuxEx
          , ConfigStateFileError(..), localBuildInfoFile
@@ -232,6 +234,7 @@ mainWorker args = topHandler $
       ,infoCommand            `commandAddAction` infoAction
       ,fetchCommand           `commandAddAction` fetchAction
       ,freezeCommand          `commandAddAction` freezeAction
+      ,genBoundsCommand       `commandAddAction` genBoundsAction
       ,getCommand             `commandAddAction` getAction
       ,hiddenCommand $
        unpackCommand          `commandAddAction` unpackAction
@@ -958,6 +961,19 @@ freezeAction freezeFlags _extraArgs globalFlags = do
             comp platform conf
             mSandboxPkgInfo
             globalFlags' freezeFlags
+
+genBoundsAction :: GenBoundsFlags -> [String] -> GlobalFlags -> IO ()
+genBoundsAction genBoundsFlags _extraArgs globalFlags = do
+  let verbosity = fromFlag (genBoundsVerbosity genBoundsFlags)
+  (useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
+  let configFlags  = savedConfigureFlags config
+      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  (comp, platform, conf) <- configCompilerAux' configFlags
+
+  maybeWithSandboxPackageInfo verbosity configFlags globalFlags'
+                              comp platform conf useSandbox $ \mSandboxPkgInfo ->
+                              maybeWithSandboxDirOnSearchPath useSandbox $
+      genBounds verbosity platform (compilerInfo comp)
 
 uploadAction :: UploadFlags -> [String] -> GlobalFlags -> IO ()
 uploadAction uploadFlags extraArgs globalFlags = do
